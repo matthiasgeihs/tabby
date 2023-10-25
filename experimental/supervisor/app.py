@@ -1,5 +1,5 @@
 """Usage:
-    python app.py --model TabbyML/StarCoder-1B --chat-model TabbyML/Mistral-7B --device metal
+    python app.py --model TabbyML/StarCoder-1B --device metal
 """
 
 import socket
@@ -7,17 +7,15 @@ import time
 import asyncio
 import argparse
 import uvicorn
-import sys
 import subprocess
 from asgi_proxy import asgi_proxy
 
-MODEL_ID = "TabbyML/StarCoder-1B"
-
-
 class TabbyLauncher(object):
-    def __init__(self, args):
+    def __init__(self, args: list[str], host: str, port: int):
         self.proc = None
         self.args = args
+        self.host = host
+        self.port = port
 
     def start(self):
         print("Starting tabby process...")
@@ -29,7 +27,7 @@ class TabbyLauncher(object):
             + self.args
             + [
                 "--port",
-                "8081",
+                str(self.port),
             ],
         )
 
@@ -38,9 +36,9 @@ class TabbyLauncher(object):
         return self
 
     def _server_ready(self):
-        # Poll until webserver at 127.0.0.1:8081 accepts connections before running inputs.
+        # Poll until webserver accepts connections before running inputs.
         try:
-            socket.create_connection(("127.0.0.1", 8081), timeout=1).close()
+            socket.create_connection((self.host, self.port), timeout=1).close()
             print("Tabby server ready!")
             return True
         except (socket.timeout, ConnectionRefusedError):
@@ -78,20 +76,23 @@ class Timer:
         self._task.cancel()
 
 
-def supervisor(serve_args):
-    launcher = TabbyLauncher(serve_args)
-    proxy = asgi_proxy("http://localhost:8081")
+def supervisor(serve_args, timeout, host, port):
+    launcher = TabbyLauncher(serve_args, host, port)
+    proxy = asgi_proxy(f"http://{host}:{port}")
     timer = None
 
     async def callback(scope, receive, send):
         nonlocal timer
-
+        
+        # Start only on http request.
+        assert scope["type"] == "http"
+    
         if not launcher.is_running:
             launcher.start()
         elif timer is not None:
             timer = timer.cancel()
 
-        timer = Timer(600, launcher.stop)
+        timer = Timer(timeout, launcher.stop)
         return await proxy(scope, receive, send)
 
     return callback
@@ -100,13 +101,22 @@ def supervisor(serve_args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start a tabby supervisor")
     parser.add_argument(
-        "-p", "--port", type=int, default=8080, help="Port to use (default: 8080)"
+        "-p", "--port", type=int, default=9080, help="Port to use (default: 9080)"
     )
     parser.add_argument(
-        "--host", default="0.0.0.0", help="Host to bind to (default: 0.0.0.0)"
+        "--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)"
+    )
+    parser.add_argument(
+        "--timeout", default=300, help="Idle time after which the server is shut down. (default: 300)"
+    )
+    parser.add_argument(
+        "--tabbyport", type=int, default=9081, help="Port to use for tabby server (default: 9081)"
+    )
+    parser.add_argument(
+        "--tabbyhost", default="127.0.0.1", help="Host to bind tabby server to (default: 127.0.0.1)"
     )
 
     args, serve_args = parser.parse_known_args()
 
-    app = supervisor(serve_args)
+    app = supervisor(serve_args, args.timeout, args.tabbyhost, args.tabbyport)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
